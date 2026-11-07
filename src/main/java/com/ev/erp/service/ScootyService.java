@@ -3,6 +3,7 @@ package com.ev.erp.service;
 import com.ev.erp.dto.ScootyRequest;
 import com.ev.erp.dto.ScootyResponse;
 import com.ev.erp.exception.ScootyNotFoundException;
+import com.ev.erp.model.InventoryItem;
 import com.ev.erp.model.Scooty;
 import com.ev.erp.repository.ScootyRepository;
 import org.springframework.stereotype.Service;
@@ -16,15 +17,32 @@ import java.util.UUID;
 public class ScootyService {
 
     private final ScootyRepository repository;
+    private final InventoryService inventoryService;
 
-    public ScootyService(ScootyRepository repository) {
+    public ScootyService(ScootyRepository repository, InventoryService inventoryService) {
         this.repository = repository;
+        this.inventoryService = inventoryService;
     }
 
-    /** "Add details" button. */
+    /**
+     * "Add details" button.
+     * Takes 1 scooty out of inventory first; if the scooty is missing or out of stock this throws
+     * InsufficientStockException (HTTP 409) and nothing is saved. If saving the row fails,
+     * the stock is put back.
+     */
     public ScootyResponse add(ScootyRequest request) {
-        Scooty scooty = toModel(UUID.randomUUID().toString(), request);
-        return toResponse(repository.save(scooty));
+        InventoryItem item = inventoryService.reserveScooty(request.bikeName(), 1);
+        try {
+            // store the exact name used in inventory
+            ScootyRequest normalized = new ScootyRequest(
+                    request.ownerName(), request.date(), request.amount(), request.batteryNumbers(),
+                    item.name(), request.chassisNo(), request.motorNo(), request.chargerNo());
+            Scooty scooty = toModel(UUID.randomUUID().toString(), normalized);
+            return toResponse(repository.save(scooty));
+        } catch (RuntimeException e) {
+            inventoryService.releaseScooty(item.name(), 1);
+            throw e;
+        }
     }
 
     /** List of cards on the page (newest first). */
@@ -56,12 +74,14 @@ public class ScootyService {
                 .toList();
     }
 
+    /** Note: update does not change inventory stock. */
     public ScootyResponse update(String id, ScootyRequest request) {
         return repository.update(toModel(id, request))
                 .map(this::toResponse)
                 .orElseThrow(() -> new ScootyNotFoundException(id));
     }
 
+    /** Note: delete does not change inventory stock. */
     public void delete(String id) {
         if (!repository.deleteById(id)) {
             throw new ScootyNotFoundException(id);
@@ -75,10 +95,17 @@ public class ScootyService {
     }
 
     private Scooty toModel(String id, ScootyRequest r) {
-        return new Scooty(id, r.ownerName().trim(), r.date(), r.amount(),
+        return new Scooty(
+                id,
+                r.ownerName().trim(),
+                r.date(),
+                r.amount(),
                 r.batteryNumbers().trim(),
-                r.bikeName().trim(), r.chassisNo().trim(),
-                r.motorNo().trim(), r.chargerNo().trim());
+                r.bikeName().trim(),
+                r.chassisNo().trim(),
+                r.motorNo().trim(),
+                r.chargerNo().trim()
+        );
     }
 
     private ScootyResponse toResponse(Scooty s) {
